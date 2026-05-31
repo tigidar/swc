@@ -1,0 +1,141 @@
+result/
+
+*.png
+.mcp.json
+
+*.class
+*.log
+
+# virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
+hs_err_pid*
+
+example/web/src/scala
+web/lib/scala
+
+.bsp
+.metals
+.bloop
+.scala-build/
+out/
+
+# probably mill bsp hash or something
+mill.*
+
+# Node modules
+node_modules/
+
+# Build output
+dist/
+build/
+
+# Vite cache
+.vite/
+
+# Tailwind CSS output
+*.css.map
+*.tmp
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment variables
+.env
+.env.*
+
+# IDE/editor files
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Dependency directories
+.pnpm/
+.cache/
+
+# Logs
+logs
+pnpm-debug.log*
+lerna-debug.log*
+
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+
+# Compiled Lua sources
+luac.out
+
+# Nix build outputs (symlinks)
+**/result
+**/result-*
+
+# If you also use direnv / devenv
+**/.direnv/
+**/.devenv/
+
+# Optional: nix-shell env files, logs, etc.
+.nix-*
+
+*.qcow2
+
+# luarocks build files
+*.src.rock
+*.zip
+*.tar.gz
+
+# Object files
+*.o
+*.os
+*.ko
+*.obj
+*.elf
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Libraries
+*.lib
+*.a
+*.la
+*.lo
+*.def
+*.exp
+
+# Shared objects (inc. Windows DLLs)
+*.dll
+*.so
+*.so.*
+*.dylib
+
+# Executables
+*.exe
+*.out
+*.app
+*.i*86
+*.x86_64
+*.hex
+
+.lua.json
+nix/myVim.log
+
+.metals
+.scala-build
+.bsp
+
