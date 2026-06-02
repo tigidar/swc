@@ -6,11 +6,44 @@ package build
 
 import mill._
 import mill.scalalib._
+import mill.scalalib.publish._
 import mill.scalanativelib._
 import mill.scalanativelib.api._
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Versions and publish coordinates
+// ─────────────────────────────────────────────────────────────────────────────
+
+object V {
+  val scala          = "3.8.3"
+  val scalaNative    = "0.5.10"
+  val organization   = "no.virtual-architect"
+  val projectVersion = "0.1.0-SNAPSHOT"
+}
+
+trait SwcPublish extends PublishModule {
+  def publishVersion = V.projectVersion
+
+  def pomSettings = PomSettings(
+    description    = "swc — Scala Native Wayland compositor toolkit.",
+    organization   = V.organization,
+    url            = "https://github.com/tigidar/swc",
+    licenses       = Seq(License.`Apache-2.0`),
+    versionControl = VersionControl.github("tigidar", "swc"),
+    developers     = Seq(
+      Developer(
+        id              = "tigidar",
+        name            = "tigidar",
+        url             = "https://github.com/tigidar",
+        organization    = Some("virtual-architect"),
+        organizationUrl = Some("https://virtual-architect.no")
+      )
+    )
+  )
+}
+
 trait CoreModule extends ScalaModule:
-  def scalaVersion = "3.8.2"
+  def scalaVersion = V.scala
   override def sources = Task.Sources(moduleDir / os.up / "src")
   def mvnDeps = Seq(
     mvn"com.github.plokhotnyuk.jsoniter-scala::jsoniter-scala-core::2.38.9",
@@ -19,7 +52,8 @@ trait CoreModule extends ScalaModule:
   )
 
 object core extends Module:
-  object jvm extends CoreModule:
+  object jvm extends CoreModule with SwcPublish:
+    def artifactName = "swc-core"
     object test extends ScalaTests:
       override def sources = Task.Sources(moduleDir / os.up / os.up / "test" / "src")
       def mvnDeps = Seq(
@@ -28,12 +62,13 @@ object core extends Module:
       )
       def testFramework = "munit.Framework"
 
-  object native extends CoreModule with ScalaNativeModule:
-    def scalaNativeVersion = "0.5.10"
+  object native extends CoreModule with ScalaNativeModule with SwcPublish:
+    def artifactName = "swc-core"
+    def scalaNativeVersion = V.scalaNative
 
 object compositor extends ScalaNativeModule {
-  def scalaVersion = "3.8.2"
-  def scalaNativeVersion = "0.5.10"
+  def scalaVersion = V.scala
+  def scalaNativeVersion = V.scalaNative
   override def moduleDeps = Seq(core.native)
 
   def releaseMode = ReleaseMode.ReleaseFast
@@ -57,9 +92,10 @@ object compositor extends ScalaNativeModule {
   }
 }
 
-object swcmsg extends ScalaNativeModule {
-  def scalaVersion = "3.8.2"
-  def scalaNativeVersion = "0.5.10"
+object swcmsg extends ScalaNativeModule with SwcPublish {
+  def artifactName = "swc-swcmsg"
+  def scalaVersion = V.scala
+  def scalaNativeVersion = V.scalaNative
   override def moduleDeps = Seq(core.native)
 
   def releaseMode = ReleaseMode.ReleaseFast
