@@ -39,6 +39,8 @@ object IpcCodec:
         case "core.ipc.GammaSet"              => "gamma-set"
         case "core.ipc.GammaResetCmd"         => "gamma-reset"
         case "core.ipc.GetStatus"             => "get-status"
+        case "core.ipc.SetIdleTimeout"        => "set-idle-timeout"
+        case "core.ipc.SetScreenOffTimeout"   => "set-screen-off-timeout"
       }
   )
 

@@ -28,7 +28,16 @@ case class CompositorState(
   cursorX:         Double             = 0.0,
   cursorY:         Double             = 0.0,
   pointerFocus:    Option[WindowId]   = None,
-  activatedWindow: Option[WindowId]   = None
+  activatedWindow: Option[WindowId]   = None,
+  // Monotonic-millisecond timestamp of the last real user input (key/pointer).
+  // Used by idle detection to decide when to auto-exit (lock). Shares the
+  // wlroots `time_msec` clock (CLOCK_MONOTONIC, 32-bit wrapping); see
+  // IdleHandler.checkIdle for wrap-safe comparison.
+  lastActivityMs:  Long               = 0L,
+  // True while the outputs are powered off (DPMS) by the screen-off idle
+  // timeout. Set by IdleHandler.checkScreenOff; cleared by the next real user
+  // input (InputHandler.recordActivity), which also emits the power-on effect.
+  screenOff:       Boolean            = false
 ):
 
   /** The focused output's info, if any. */

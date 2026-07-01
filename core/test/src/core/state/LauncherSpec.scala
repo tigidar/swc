@@ -12,7 +12,7 @@ class LauncherSpec extends FunSuite:
 
   private def stateWithOutput: CompositorState =
     val (s, _, _) = EventHandler.run(cfg, CompositorState.empty)(
-      EventHandler.addOutput(out1, 1920, 1080, 0, 0)
+      OutputHandler.addOutput(out1, 1920, 1080, 0, 0)
     )
     s
 
@@ -148,7 +148,7 @@ class LauncherSpec extends FunSuite:
   test("handleKey with OpenLauncher opens launcher") {
     val s0 = stateWithOutput
     val event = KeyEvent(KeySym(0x0020), Modifiers.Super, Pressed) // Super+Space
-    val (s1, effects, handled) = run(s0)(EventHandler.handleKey(event))
+    val (s1, effects, handled) = run(s0)(KeyActionHandler.handleKey(event))
     assertEquals(handled, true)
     assertEquals(s1.launcherText, Some(""))
     assert(effects.toSeq.contains(ShellEffect.ShowLauncher))

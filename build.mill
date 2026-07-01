@@ -10,12 +10,12 @@ import mill.scalanativelib._
 import mill.scalanativelib.api._
 
 trait CoreModule extends ScalaModule:
-  def scalaVersion = "3.8.2"
+  def scalaVersion = build.deps.Platform.scala
   override def sources = Task.Sources(moduleDir / os.up / "src")
   def mvnDeps = Seq(
-    mvn"com.github.plokhotnyuk.jsoniter-scala::jsoniter-scala-core::2.38.9",
-    mvn"com.github.plokhotnyuk.jsoniter-scala::jsoniter-scala-macros::2.38.9",
-    mvn"io.getkyo::kyo-prelude::1.0-RC1"
+    build.deps.Deps.jsoniterCore,
+    build.deps.Deps.jsoniterMacros,
+    build.deps.Deps.kyoPrelude
   )
 
 object core extends Module:
@@ -23,23 +23,27 @@ object core extends Module:
     object test extends ScalaTests:
       override def sources = Task.Sources(moduleDir / os.up / os.up / "test" / "src")
       def mvnDeps = Seq(
-        mvn"org.scalameta::munit::1.0.3",
-        mvn"org.scalameta::munit-scalacheck::1.0.0"
+        build.deps.Deps.munit,
+        build.deps.Deps.munitScalaCheck
       )
       def testFramework = "munit.Framework"
 
   object native extends CoreModule with ScalaNativeModule:
-    def scalaNativeVersion = "0.5.10"
+    def scalaNativeVersion = build.deps.Platform.scalaNative
 
 object compositor extends ScalaNativeModule {
-  def scalaVersion = "3.8.2"
-  def scalaNativeVersion = "0.5.10"
+  def scalaVersion = build.deps.Platform.scala
+  def scalaNativeVersion = build.deps.Platform.scalaNative
   override def moduleDeps = Seq(core.native)
 
   def releaseMode = ReleaseMode.ReleaseFast
 
+  // Use the clang from PATH (nix develop shell) instead of Scala Native's bundled discovery
+  def nativeClang = Task { PathRef(os.Path(os.proc("which", "clang").call().out.trim())) }
+  def nativeClangPP = Task { PathRef(os.Path(os.proc("which", "clang++").call().out.trim())) }
+
   def nativeLinkingOptions = Task {
-    val wlroots = os.proc("pkg-config", "--libs", "wlroots-0.18").call().out.trim().split("\\s+").toSeq
+    val wlroots = os.proc("pkg-config", "--libs", "wlroots-0.19").call().out.trim().split("\\s+").toSeq
     val wayland = os.proc("pkg-config", "--libs", "wayland-server").call().out.trim().split("\\s+").toSeq
     val xkb = os.proc("pkg-config", "--libs", "xkbcommon").call().out.trim().split("\\s+").toSeq
     val pixman = os.proc("pkg-config", "--libs", "pixman-1").call().out.trim().split("\\s+").toSeq
@@ -48,7 +52,7 @@ object compositor extends ScalaNativeModule {
   }
 
   def nativeCompileOptions = Task {
-    val wlroots = os.proc("pkg-config", "--cflags", "wlroots-0.18").call().out.trim().split("\\s+").toSeq
+    val wlroots = os.proc("pkg-config", "--cflags", "wlroots-0.19").call().out.trim().split("\\s+").toSeq
     val wayland = os.proc("pkg-config", "--cflags", "wayland-server").call().out.trim().split("\\s+").toSeq
     val libinput = os.proc("pkg-config", "--cflags", "libinput").call().out.trim().split("\\s+").toSeq
     val libdrm = os.proc("pkg-config", "--cflags", "libdrm").call().out.trim().split("\\s+").toSeq
@@ -58,8 +62,8 @@ object compositor extends ScalaNativeModule {
 }
 
 object swcmsg extends ScalaNativeModule {
-  def scalaVersion = "3.8.2"
-  def scalaNativeVersion = "0.5.10"
+  def scalaVersion = build.deps.Platform.scala
+  def scalaNativeVersion = build.deps.Platform.scalaNative
   override def moduleDeps = Seq(core.native)
 
   def releaseMode = ReleaseMode.ReleaseFast

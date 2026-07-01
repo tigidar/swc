@@ -2,18 +2,20 @@ package core.state
 
 import kyo.*
 import core.input.*
-import core.output.*
-import core.windows.*
-import core.geometry.*
+import core.windows.WindowId
 
 /**
- * Pure `InputEvent` interpreter.
+ * Pure `InputEvent` dispatcher.
  *
  * The compositor shell extracts primitives from wlroots, constructs an
  * `InputEvent`, and passes it to [[handle]] via `EventHandler.run`.
- * `handle` updates `CompositorState` and emits `ShellEffect`s describing
- * the work the shell must perform on wlroots. This keeps every callback
- * pure and JVM-testable.
+ * `handle` records activity (idle/screen-off wake) then routes the event to
+ * the sibling domain handler that owns it — [[KeyboardHandler]],
+ * [[PointerHandler]], [[WindowHandler]], [[OutputHandler]], [[WindowActions]],
+ * and the [[EventHandler]] grab setters — each of which updates
+ * `CompositorState` and emits the `ShellEffect`s the shell must perform on
+ * wlroots. Keeping the routing here and the domain logic in cohesive siblings
+ * keeps every callback pure and JVM-testable.
  */
 object InputHandler:
 
@@ -21,150 +23,72 @@ object InputHandler:
 
   /** Dispatch an `InputEvent` to its handler. */
   def handle(event: InputEvent)(using Frame): Unit < Effects =
+    for
+      _ <- recordActivity(event)
+      _ <- dispatch(event)
+    yield ()
+
+  /**
+   * Reset the idle timer for genuine user input (keyboard / pointer).
+   *
+   * Window and output lifecycle events are not user activity and must not
+   * keep the session awake, otherwise a chatty client could prevent
+   * auto-lock. Uses the event's `time_msec` so it shares the clock that
+   * [[IdleHandler.checkIdle]] compares against.
+   */
+  private def recordActivity(event: InputEvent)(using Frame): Unit < Effects =
+    val activityMs: Option[Long] = event match
+      case e: InputEvent.KeyPress      => Some(e.time)
+      case e: InputEvent.KeyRelease    => Some(e.time)
+      case e: InputEvent.PointerMoved  => Some(e.time)
+      case e: InputEvent.PointerButton => Some(e.time)
+      case _                           => None
+    activityMs match
+      case Some(ms) =>
+        for
+          s <- Var.get[CompositorState]
+          // Real input also wakes the screen: if the screen-off idle timeout
+          // had powered the outputs off, clear the flag and emit the power-on
+          // effect so the shell re-enables them.
+          _ <- Var.set(s.copy(lastActivityMs = ms, screenOff = false))
+          _ <- if s.screenOff then Emit.value(ShellEffect.SetScreenOff(false))
+               else ((): Unit < Effects)
+        yield ()
+      case None => ((): Unit < Effects)
+
+  private def dispatch(event: InputEvent)(using Frame): Unit < Effects =
     event match
       // Output lifecycle — delegate to EventHandler
       case InputEvent.OutputAdded(id, width, height, layoutX, layoutY) =>
-        EventHandler.addOutput(id, width, height, layoutX, layoutY)
-      case InputEvent.OutputRemoved(id)       => EventHandler.removeOutput(id)
+        OutputHandler.addOutput(id, width, height, layoutX, layoutY)
+      case InputEvent.OutputRemoved(id)       => OutputHandler.removeOutput(id)
       case InputEvent.UsableAreaChanged(id, area) =>
-        EventHandler.updateUsableArea(id, area)
+        OutputHandler.updateUsableArea(id, area)
 
-      // Keyboard device lifecycle
-      case InputEvent.KeyboardAdded(id)     => handleKeyboardAdded(id)
-      case InputEvent.KeyboardRemoved(id)   => handleKeyboardRemoved(id)
+      // Keyboard device lifecycle — delegate to KeyboardHandler
+      case InputEvent.KeyboardAdded(id)     => KeyboardHandler.added(id)
+      case InputEvent.KeyboardRemoved(id)   => KeyboardHandler.removed(id)
 
-      // Key events
-      case e: InputEvent.KeyPress           => handleKeyPress(e)
-      case e: InputEvent.KeyRelease         => handleKeyRelease(e)
+      // Key events — delegate to KeyboardHandler
+      case e: InputEvent.KeyPress           => KeyboardHandler.keyPress(e)
+      case e: InputEvent.KeyRelease         => KeyboardHandler.keyRelease(e)
 
-      // Window lifecycle — delegate to EventHandler
+      // Window lifecycle — delegate to WindowHandler
       case _: InputEvent.WindowCreated      => ((): Unit < Effects)
       case InputEvent.WindowMapped(id, oid, title, appId) =>
-        EventHandler.mapWindow(id, oid, title, appId)
-      case InputEvent.WindowUnmapped(id)    => EventHandler.unmapWindow(id)
-      case InputEvent.WindowDestroyed(id)   => EventHandler.destroyWindow(id)
+        WindowHandler.mapWindow(id, oid, title, appId)
+      case InputEvent.WindowUnmapped(id)    => WindowHandler.unmapWindow(id)
+      case InputEvent.WindowDestroyed(id)   => WindowHandler.destroyWindow(id)
       case InputEvent.RequestMove(id, cx, cy, wx, wy) =>
         EventHandler.beginGrab(GrabState.Moving(id, cx, cy, wx, wy))
       case InputEvent.RequestResize(id, edges, cx, cy, wx, wy, ww, wh) =>
         EventHandler.beginGrab(GrabState.Resizing(id, cx, cy, wx, wy, ww, wh, edges))
-      case _: InputEvent.RequestFullscreen  => EventHandler.toggleFullscreen
+      case _: InputEvent.RequestFullscreen  => WindowActions.toggleFullscreen
 
-      // Pointer events
-      case e: InputEvent.PointerMoved       => handlePointerMoved(e)
-      case e: InputEvent.PointerButton      => handlePointerButton(e)
+      // Pointer events — delegate to PointerHandler
+      case e: InputEvent.PointerMoved       => PointerHandler.moved(e)
+      case e: InputEvent.PointerButton      => PointerHandler.button(e)
 
-  /** Allocate a new `WindowId`. Delegates to `EventHandler.createWindow`. */
+  /** Allocate a new `WindowId`. Delegates to `WindowHandler.createWindow`. */
   def handleNewWindow(title: Option[String], appId: Option[String])(using Frame): WindowId < Effects =
-    EventHandler.createWindow(title, appId)
-
-  // ── Keyboard device lifecycle ───────────────────────────────────────
-
-  private def handleKeyboardAdded(id: KeyboardId)(using Frame): Unit < Effects =
-    for
-      s <- Var.get[CompositorState]
-      newKeyboards  = if s.keyboards.contains(id) then s.keyboards else s.keyboards :+ id
-      becomesActive = s.activeKeyboard.isEmpty
-      _ <- Var.set(s.copy(keyboards = newKeyboards, activeKeyboard = s.activeKeyboard.orElse(Some(id))))
-      _ <- if becomesActive then Emit.value(ShellEffect.SetActiveKeyboard(id))
-           else ((): Unit < Emit[ShellEffect])
-    yield ()
-
-  private def handleKeyboardRemoved(id: KeyboardId)(using Frame): Unit < Effects =
-    for
-      s <- Var.get[CompositorState]
-      newKeyboards = s.keyboards.filterNot(_ == id)
-      newActive = s.activeKeyboard match
-        case Some(aid) if aid == id => newKeyboards.headOption
-        case other                  => other
-      _ <- Var.set(s.copy(keyboards = newKeyboards, activeKeyboard = newActive))
-    yield ()
-
-  // ── Key events ──────────────────────────────────────────────────────
-
-  private def handleKeyPress(e: InputEvent.KeyPress)(using Frame): Unit < Effects =
-    for
-      _ <- markActiveKeyboard(e.keyboardId)
-      s <- Var.get[CompositorState]
-      _ <- s.launcherText match
-        case Some(_) =>
-          // Launcher is open — the shell routes keys into LauncherHandler
-          // imperatively (keysym → LauncherInput conversion needs XKB/FFI).
-          // Do not emit ForwardKeyToClient so the key is swallowed here.
-          ((): Unit < Effects)
-        case None =>
-          for
-            h1 <- EventHandler.handleKey(KeyEvent(e.keysym, e.modifiers, Pressed))
-            h2 <- if h1 then (true: Boolean < Effects)
-                  else EventHandler.handleKey(KeyEvent(e.rawKeysym, e.modifiers, Pressed))
-            _  <- if h2 then ((): Unit < Effects)
-                  else Emit.value(
-                    ShellEffect.ForwardKeyToClient(e.keyboardId, e.time, e.keycode, true)
-                  )
-          yield ()
-    yield ()
-
-  private def handleKeyRelease(e: InputEvent.KeyRelease)(using Frame): Unit < Effects =
-    Emit.value(ShellEffect.ForwardKeyToClient(e.keyboardId, e.time, e.keycode, false))
-
-  private def markActiveKeyboard(id: KeyboardId)(using Frame): Unit < Effects =
-    for
-      s <- Var.get[CompositorState]
-      _ <- Var.set(s.copy(activeKeyboard = Some(id)))
-      _ <- Emit.value(ShellEffect.SetActiveKeyboard(id))
-    yield ()
-
-  // ── Pointer events ──────────────────────────────────────────────────
-
-  private def handlePointerMoved(e: InputEvent.PointerMoved)(using Frame): Unit < Effects =
-    for
-      s <- Var.get[CompositorState]
-      _ <- s.grabState match
-        case Some(grab: GrabState.Moving) =>
-          for
-            _ <- Var.set(s.copy(cursorX = e.cursorX, cursorY = e.cursorY))
-            (x, y) = GrabState.computeMove(grab, e.cursorX, e.cursorY)
-            _ <- Emit.value(ShellEffect.MoveWindow(grab.id, x, y))
-          yield ()
-        case Some(grab: GrabState.Resizing) =>
-          for
-            _ <- Var.set(s.copy(cursorX = e.cursorX, cursorY = e.cursorY))
-            r = GrabState.computeResize(grab, e.cursorX, e.cursorY)
-            _ <- Emit.value(ShellEffect.ResizeWindow(grab.id, r.x, r.y, r.w, r.h))
-          yield ()
-        case None =>
-          e.focus match
-            case Focus(wid, surfacePos) =>
-              if s.pointerFocus.contains(wid) then
-                for
-                  _ <- Var.set(s.copy(cursorX = e.cursorX, cursorY = e.cursorY))
-                  _ <- Emit.value(ShellEffect.PointerMotion(e.time, surfacePos.x, surfacePos.y))
-                yield ()
-              else
-                for
-                  _ <- Var.set(s.copy(
-                    cursorX      = e.cursorX,
-                    cursorY      = e.cursorY,
-                    pointerFocus = Some(wid)
-                  ))
-                  _ <- Emit.value(ShellEffect.PointerEnter(wid, surfacePos.x, surfacePos.y))
-                yield ()
-            case NoFocus =>
-              for
-                _ <- Var.set(s.copy(
-                  cursorX      = e.cursorX,
-                  cursorY      = e.cursorY,
-                  pointerFocus = None
-                ))
-                _ <- Emit.value(ShellEffect.ClearPointerFocus)
-                _ <- Emit.value(ShellEffect.SetDefaultCursor)
-              yield ()
-    yield ()
-
-  private def handlePointerButton(e: InputEvent.PointerButton)(using Frame): Unit < Effects =
-    for
-      s <- Var.get[CompositorState]
-      _ <- (e.pressed, e.focus) match
-        case (true, Focus(wid, _)) if s.grabState.isEmpty => EventHandler.requestFocus(wid)
-        case (false, _) if s.grabState.isDefined          => EventHandler.releaseGrab
-        case _                                            => ((): Unit < Effects)
-    yield ()
+    WindowHandler.createWindow(title, appId)

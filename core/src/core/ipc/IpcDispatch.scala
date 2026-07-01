@@ -2,7 +2,7 @@ package core.ipc
 
 import kyo.*
 import core.windows.{WindowId, WindowList, FocusModel}
-import core.state.{CompositorState, CompositorConfig, ShellEffect, EventHandler}
+import core.state.{CompositorState, CompositorConfig, ShellEffect, EventHandler, OutputHandler, WorkspaceHandler, TilingHandler}
 import core.output.{OutputId, WorkspaceId}
 
 /**
@@ -55,10 +55,10 @@ object IpcDispatch:
         Emit.value(ShellEffect.SpawnProcess(args)).andThen(Ok)
 
       case LayoutSetMasterRatio(ratio) =>
-        EventHandler.setMasterRatio(ratio).andThen(Ok)
+        TilingHandler.setMasterRatio(ratio).andThen(Ok)
 
       case LayoutSetMasterCount(count) =>
-        EventHandler.setMasterCount(count).andThen(Ok)
+        TilingHandler.setMasterCount(count).andThen(Ok)
 
       // ── Output commands ──────────────────────────────────────────
 
@@ -86,18 +86,18 @@ object IpcDispatch:
         }
 
       case FocusOutputCmd(index) =>
-        EventHandler.focusOutputByIndex(index).andThen(Ok)
+        OutputHandler.focusOutputByIndex(index).andThen(Ok)
 
       case MoveToOutputCmd(index) =>
-        EventHandler.moveWindowToOutputByIndex(index).andThen(Ok)
+        WorkspaceHandler.moveWindowToOutputByIndex(index).andThen(Ok)
 
       // ── Workspace commands ───────────────────────────────────────
 
       case SwitchWorkspaceCmd(ws) =>
-        EventHandler.switchWorkspace(WorkspaceId(ws)).andThen(Ok)
+        WorkspaceHandler.switchWorkspace(WorkspaceId(ws)).andThen(Ok)
 
       case MoveToWorkspaceCmd(ws) =>
-        EventHandler.moveWindowToWorkspace(WorkspaceId(ws)).andThen(Ok)
+        WorkspaceHandler.moveWindowToWorkspace(WorkspaceId(ws)).andThen(Ok)
 
       // ── Gamma control ─────────────────────────────────────────────
 
@@ -139,3 +139,18 @@ object IpcDispatch:
             }
           }
         yield StatusResponse(infos)
+
+      // ── Runtime configuration ─────────────────────────────────────
+
+      case SetIdleTimeout(seconds) =>
+        // Clamp to non-negative; 0 disables idle auto-exit. The shell owns the
+        // CompositorConfig var and the wl idle timer, so we hand it the value
+        // as a ShellEffect rather than mutating config from the pure pipeline.
+        val ms = Math.max(0L, seconds) * 1000L
+        Emit.value(ShellEffect.SetIdleTimeout(ms)).andThen(Ok)
+
+      case SetScreenOffTimeout(seconds) =>
+        // Clamp to non-negative; 0 disables screen-off. Same shell-owned-config
+        // pattern as SetIdleTimeout: emit the effect, let the shell re-arm.
+        val ms = Math.max(0L, seconds) * 1000L
+        Emit.value(ShellEffect.SetScreenOffTimeout(ms)).andThen(Ok)

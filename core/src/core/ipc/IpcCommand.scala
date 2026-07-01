@@ -37,3 +37,9 @@ case object GammaResetCmd extends IpcCommand
 
 // Status bar
 case object GetStatus extends IpcCommand
+
+// Runtime configuration
+/** Set the idle auto-lock timeout, in seconds. 0 disables idle auto-exit. */
+case class SetIdleTimeout(seconds: Long) extends IpcCommand
+/** Set the screen-off (DPMS) idle timeout, in seconds. 0 disables screen-off. */
+case class SetScreenOffTimeout(seconds: Long) extends IpcCommand

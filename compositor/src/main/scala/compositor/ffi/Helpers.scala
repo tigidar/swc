@@ -8,6 +8,7 @@ type WlrCursor = CStruct0
 type WlrXcursorManager = CStruct0
 type WlrXdgToplevel = CStruct0
 type WlrXdgSurface = CStruct0
+type WlrXdgPopup = CStruct0
 type WlrSurface = CStruct0
 type WlrOutputMode = CStruct0
 type WlrKeyboard = CStruct0
@@ -71,11 +72,21 @@ object Helpers:
   @name("wlr_output_test_state")
   def helper_output_test_state(output: Ptr[WlrOutput], state: Ptr[WlrOutputState]): CInt = extern
   def helper_output_event_request_state_get_state(event: Ptr[Byte]): Ptr[WlrOutputState] = extern
+  def helper_output_event_request_state_get_output(event: Ptr[Byte]): Ptr[WlrOutput] = extern
 
   // ── XDG Shell signals ─────────────────────────────────────────────
   def helper_xdg_shell_get_new_toplevel(shell: Ptr[WlrXdgShell]): Ptr[Byte] = extern
+  def helper_xdg_shell_get_new_popup(shell: Ptr[WlrXdgShell]): Ptr[Byte] = extern
+
+  // ── XDG Popup ─────────────────────────────────────────────────────
+  // Stash a surface's scene tree on xdg_surface->data so child popups can
+  // parent under it; graft a new popup into the scene graph (tinywl pattern).
+  def helper_xdg_surface_set_data(surface: Ptr[WlrXdgSurface], data: Ptr[WlrSceneTree]): Unit = extern
+  def helper_scene_xdg_popup_create(popup: Ptr[WlrXdgPopup]): Ptr[WlrSceneTree] = extern
 
   // ── XDG Toplevel ──────────────────────────────────────────────────
+  def helper_xdg_toplevel_get_surface_commit(toplevel: Ptr[WlrXdgToplevel]): Ptr[Byte] = extern
+  def helper_xdg_surface_is_initial_commit(toplevel: Ptr[WlrXdgToplevel]): CInt = extern
   def helper_xdg_toplevel_get_map(toplevel: Ptr[WlrXdgToplevel]): Ptr[Byte] = extern
   def helper_xdg_toplevel_get_unmap(toplevel: Ptr[WlrXdgToplevel]): Ptr[Byte] = extern
   def helper_xdg_toplevel_get_destroy(toplevel: Ptr[WlrXdgToplevel]): Ptr[Byte] = extern

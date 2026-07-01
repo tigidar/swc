@@ -22,7 +22,7 @@ type WlrOutputState = CStruct0
 type WlrSceneTree = CStruct0
 
 @extern
-@link("wlroots-0.18")
+@link("wlroots-0.19")
 object Wlroots:
   // Backend
   def wlr_backend_autocreate(loop: Ptr[WlEventLoop], session: Ptr[Byte]): Ptr[WlrBackend] = extern

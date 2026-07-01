@@ -130,9 +130,14 @@ int helper_output_set_gamma_brightness(struct wlr_output *output, float factor) 
 
 /* ── Output event request_state accessor ────────────────────────────── */
 
-struct wlr_output_state *helper_output_event_request_state_get_state(void *event) {
+const struct wlr_output_state *helper_output_event_request_state_get_state(void *event) {
     struct wlr_output_event_request_state *e = event;
     return e->state;
+}
+
+struct wlr_output *helper_output_event_request_state_get_output(void *event) {
+    struct wlr_output_event_request_state *e = event;
+    return e->output;
 }
 
 /* ── XDG Shell signal accessors ─────────────────────────────────────── */
@@ -141,7 +146,49 @@ struct wl_signal *helper_xdg_shell_get_new_toplevel(struct wlr_xdg_shell *shell)
     return &shell->events.new_toplevel;
 }
 
+struct wl_signal *helper_xdg_shell_get_new_popup(struct wlr_xdg_shell *shell) {
+    return &shell->events.new_popup;
+}
+
+/* Store an xdg_surface's scene tree on surface->data so child popups can find
+ * the tree to parent themselves under (see helper_scene_xdg_popup_create). */
+void helper_xdg_surface_set_data(struct wlr_xdg_surface *surface, void *data) {
+    surface->data = data;
+}
+
+/* Graft a newly-created xdg_popup into the scene graph beneath its parent
+ * surface's scene tree (mirrors tinywl's server_new_xdg_popup). wlroots'
+ * wlr_scene_xdg_surface_create only adds the surface and its sub-surfaces —
+ * NOT popups — so without this a client's menus and right-click context menus
+ * never enter the scene graph, and therefore never render or receive pointer
+ * input. The parent surface stashes its scene tree in xdg_surface->data; the
+ * new popup stashes its own tree there too, so nested popups chain correctly.
+ * Returns NULL if the parent is not an xdg_surface or has no scene tree yet. */
+struct wlr_scene_tree *helper_scene_xdg_popup_create(struct wlr_xdg_popup *popup) {
+    struct wlr_xdg_surface *parent =
+        wlr_xdg_surface_try_from_wlr_surface(popup->parent);
+    if (parent == NULL) {
+        return NULL;
+    }
+    struct wlr_scene_tree *parent_tree = parent->data;
+    if (parent_tree == NULL) {
+        return NULL;
+    }
+    struct wlr_scene_tree *tree =
+        wlr_scene_xdg_surface_create(parent_tree, popup->base);
+    popup->base->data = tree;
+    return tree;
+}
+
 /* ── XDG Toplevel accessors ─────────────────────────────────────────── */
+
+struct wl_signal *helper_xdg_toplevel_get_surface_commit(struct wlr_xdg_toplevel *toplevel) {
+    return &toplevel->base->surface->events.commit;
+}
+
+int helper_xdg_surface_is_initial_commit(struct wlr_xdg_toplevel *toplevel) {
+    return toplevel->base->initial_commit ? 1 : 0;
+}
 
 struct wl_signal *helper_xdg_toplevel_get_map(struct wlr_xdg_toplevel *toplevel) {
     return &toplevel->base->surface->events.map;
@@ -607,15 +654,11 @@ int helper_scene_node_get_y(struct wlr_scene_node *node) {
 }
 
 int helper_xdg_toplevel_get_width(struct wlr_xdg_toplevel *toplevel) {
-    struct wlr_box geo;
-    wlr_xdg_surface_get_geometry(toplevel->base, &geo);
-    return geo.width;
+    return toplevel->base->geometry.width;
 }
 
 int helper_xdg_toplevel_get_height(struct wlr_xdg_toplevel *toplevel) {
-    struct wlr_box geo;
-    wlr_xdg_surface_get_geometry(toplevel->base, &geo);
-    return geo.height;
+    return toplevel->base->geometry.height;
 }
 
 /* ── Damage tracking helpers ────────────────────────────────────────── */
@@ -734,6 +777,26 @@ struct wl_event_source *helper_event_loop_add_fd(
     void *data)
 {
     return wl_event_loop_add_fd(loop, fd, WL_EVENT_READABLE, func, data);
+}
+
+/* ── Idle timer ────────────────────────────────────────────────────── */
+
+/* Register a one-shot timer source; arm it with wl_event_source_timer_update.
+ * The callback (wl_event_loop_timer_func_t) is `int (*)(void *data)`. */
+struct wl_event_source *helper_event_loop_add_timer(
+    struct wl_event_loop *loop,
+    wl_event_loop_timer_func_t func,
+    void *data)
+{
+    return wl_event_loop_add_timer(loop, func, data);
+}
+
+/* Current CLOCK_MONOTONIC time in milliseconds, truncated to 32 bits to match
+ * wlroots input-event `time_msec` so idle math shares one clock domain. */
+uint32_t helper_now_msec(void) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (uint32_t)(now.tv_sec * 1000 + now.tv_nsec / 1000000);
 }
 
 /* ── Pointer constraints helpers ───────────────────────────────── */
