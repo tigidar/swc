@@ -44,6 +44,12 @@ enum ShellEffect:
   case AdjustKbdBrightness(delta: Int)
   /** Set gamma brightness factor on all outputs (0.1 to 1.0). */
   case SetGamma(factor: Float)
+  /** Set the idle auto-lock timeout (milliseconds) and re-arm the idle timer. 0 disables. */
+  case SetIdleTimeout(ms: Long)
+  /** Power all outputs off (DPMS) when `off` is true, or back on when false. No lock/suspend/exit. */
+  case SetScreenOff(off: Boolean)
+  /** Set the screen-off (DPMS) idle timeout (milliseconds) and re-arm its timer. 0 disables. */
+  case SetScreenOffTimeout(ms: Long)
   /** Show the launcher popup widget. */
   case ShowLauncher
   /** Hide the launcher popup widget. */

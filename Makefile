@@ -1,6 +1,6 @@
 NIX_SHELL := nix develop --command
 
-.PHONY: help compile link build build-all run-headless vm test unit-test vm-test ipc-test multi-monitor-test clean
+.PHONY: help compile link build build-all run-headless vm test unit-test vm-test ipc-test multi-monitor-test idle-lock-test clean
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -32,6 +32,9 @@ ipc-test: build ## Run NixOS VM IPC integration test
 
 multi-monitor-test: build ## Run NixOS VM multi-monitor test (2 outputs)
 	nix build --impure .#checks.x86_64-linux.multi-monitor-test --print-build-logs
+
+idle-lock-test: build ## Run NixOS VM idle auto-lock (exit-to-getty) test
+	nix build --impure .#checks.x86_64-linux.idle-lock-test --print-build-logs
 
 test: unit-test vm-test ipc-test ## Run all tests
 

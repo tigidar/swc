@@ -5,7 +5,7 @@ import munit.ScalaCheckSuite
 import org.scalacheck.Prop.*
 import org.scalacheck.{Arbitrary, Gen}
 import core.windows.WindowId
-import core.state.{CompositorConfig, CompositorState, ShellEffect, EventHandler}
+import core.state.{CompositorConfig, CompositorState, ShellEffect, EventHandler, WindowHandler, OutputHandler}
 import core.output.{OutputId, WorkspaceId}
 import kyo.Abort
 
@@ -48,6 +48,21 @@ class IpcSpec extends FunSuite:
     assertEquals(
       IpcCodec.parse("""{"cmd":"layout-set-master-count","value":2}"""),
       Right(LayoutSetMasterCount(2))
+    )
+  }
+
+  test("""parse({"cmd":"set-idle-timeout","seconds":600}) returns Right(SetIdleTimeout(600))""") {
+    assertEquals(
+      IpcCodec.parse("""{"cmd":"set-idle-timeout","seconds":600}"""),
+      Right(SetIdleTimeout(600L))
+    )
+  }
+
+  // Exactly the JSON `swcmsg set-screen-off-timeout 600` emits.
+  test("""parse({"cmd":"set-screen-off-timeout","seconds":600}) returns Right(SetScreenOffTimeout(600))""") {
+    assertEquals(
+      IpcCodec.parse("""{"cmd":"set-screen-off-timeout","seconds":600}"""),
+      Right(SetScreenOffTimeout(600L))
     )
   }
 
@@ -124,15 +139,15 @@ class IpcSpec extends FunSuite:
   /** State with one output, ready for dispatch tests. */
   private def stateWithOutput: CompositorState =
     val (s, _, _) = EventHandler.run(cfg, CompositorState.empty)(
-      EventHandler.addOutput(out1, 1920, 1080, 0, 0)
+      OutputHandler.addOutput(out1, 1920, 1080, 0, 0)
     )
     s
 
   /** State with one output and a mapped window (focused). */
   private def stateWithWindow: (CompositorState, WindowId) =
     val s0 = stateWithOutput
-    val (s1, _, id) = EventHandler.run(cfg, s0)(EventHandler.createWindow(Some("w"), None))
-    val (s2, _, _) = EventHandler.run(cfg, s1)(EventHandler.mapWindow(id, out1, Some("w"), None))
+    val (s1, _, id) = EventHandler.run(cfg, s0)(WindowHandler.createWindow(Some("w"), None))
+    val (s2, _, _) = EventHandler.run(cfg, s1)(WindowHandler.mapWindow(id, out1, Some("w"), None))
     (s2, id)
 
   private def dispatch(cmd: IpcCommand, state: CompositorState) =
@@ -191,6 +206,21 @@ class IpcSpec extends FunSuite:
     val (_, effects, resp) = dispatch(Spawn(List("foot")), stateWithOutput)
     assertEquals(resp, Ok)
     assert(effects.toSeq.contains(ShellEffect.SpawnProcess(List("foot"))))
+  }
+
+  // Proves the full live-change chain on the JVM side: command → dispatch →
+  // the SetScreenOffTimeout effect the shell turns into setScreenOffTimeout(ms).
+  // seconds are converted to ms.
+  test("dispatch(SetScreenOffTimeout(600)) returns Ok and emits SetScreenOffTimeout(600000)") {
+    val (_, effects, resp) = dispatch(SetScreenOffTimeout(600L), stateWithOutput)
+    assertEquals(resp, Ok)
+    assertEquals(effects.toSeq, Seq(ShellEffect.SetScreenOffTimeout(600000L)))
+  }
+
+  test("dispatch(SetScreenOffTimeout(0)) emits SetScreenOffTimeout(0) (disable live)") {
+    val (_, effects, resp) = dispatch(SetScreenOffTimeout(0L), stateWithOutput)
+    assertEquals(resp, Ok)
+    assertEquals(effects.toSeq, Seq(ShellEffect.SetScreenOffTimeout(0L)))
   }
 
   test("dispatch(LayoutSetMasterRatio) returns Ok and updates workspace config") {

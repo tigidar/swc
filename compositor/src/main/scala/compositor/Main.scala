@@ -16,7 +16,7 @@ import core.input.{InputEvent, KeyBindingMap, KeyboardId, KeyEvent, KeySym, Modi
                    PointerFocus, Focus, NoFocus}
 import core.windows.{WindowId, WindowState, WindowList, FocusModel}
 import core.layout.{MasterStackLayout, MasterStackConfig}
-import core.state.{CompositorConfig, CompositorState, GrabState, InputHandler, ShellEffect, EventHandler}
+import core.state.{CompositorConfig, CompositorState, GrabState, InputHandler, ShellEffect, EventHandler, IdleHandler}
 import core.output.{OutputId, OutputInfo}
 import kyo.Frame
 
@@ -109,6 +109,13 @@ object Server:
   // Global listeners (cleaned up on shutdown)
   var globalListeners: List[Ptr[Byte]] = Nil
 
+  // Idle auto-lock timer (self-rearming; fires when no input for idleTimeoutMs)
+  var idleTimer: Ptr[WlEventSource] = null
+
+  // Screen-off (DPMS) timer (self-rearming; fires when no input for
+  // screenOffTimeoutMs → powers outputs off without locking/suspending/exiting)
+  var dpmsTimer: Ptr[WlEventSource] = null
+
   // Launcher widget
   var launcherTree: Ptr[WlrSceneTree] = null
   var launcherSceneBuf: Ptr[WlrSceneBuffer] = null
@@ -125,6 +132,21 @@ object Main:
     if termEnv != null && string.strlen(termEnv).toInt > 0 then
       config = config.copy(terminalCmd = fromCString(termEnv))
 
+    // Idle auto-lock: COMPOSITOR_IDLE_SECONDS seconds of no input → exit to login.
+    val idleEnv = stdlib.getenv(c"COMPOSITOR_IDLE_SECONDS")
+    if idleEnv != null then
+      val secs = try fromCString(idleEnv).trim.toLong catch case _: NumberFormatException => 0L
+      if secs > 0 then config = config.copy(idleTimeoutMs = secs * 1000L)
+
+    // Screen-off (DPMS): COMPOSITOR_SCREEN_OFF_SECONDS of no input → power the
+    // outputs off (no lock/suspend/exit). Defaults to ~7 minutes (set in
+    // CompositorConfig); "0" explicitly disables, an invalid value keeps the
+    // default.
+    val screenOffEnv = stdlib.getenv(c"COMPOSITOR_SCREEN_OFF_SECONDS")
+    if screenOffEnv != null then
+      val secs = try fromCString(screenOffEnv).trim.toLong catch case _: NumberFormatException => -1L
+      if secs >= 0 then config = config.copy(screenOffTimeoutMs = secs * 1000L)
+
     display = wl_display_create()
     if display == null then fatal(c"failed to create wl_display")
 
@@ -140,8 +162,122 @@ object Main:
       spawnProcess(List(config.terminalCmd))
 
     IpcServer.init(loop)
+    initIdleTimer(loop)
+    initScreenOffTimer(loop)
     wl_display_run(display)
     shutdown()
+
+  /**
+   * Arm the idle auto-lock timer. The timer is one-shot and re-arms itself for
+   * the remaining time until the deadline each time it fires, so it only wakes
+   * the CPU near the deadline (no periodic polling). When the deadline passes
+   * with no input, `IdleHandler.checkIdle` emits `TerminateDisplay` and the
+   * compositor exits — returning the session to the TTY login prompt.
+   */
+  private def initIdleTimer(loop: Ptr[WlEventLoop]): Unit =
+    if config.idleTimeoutMs <= 0 then return
+    // Seed last-activity to "now" so an idle user who never touches the input
+    // still locks one timeout period after startup.
+    wm = wm.copy(lastActivityMs = WaylandEventLoop.nowMsec().toLong)
+    idleTimer = WaylandEventLoop.addTimer(loop, onIdleTimer, null)
+    WaylandEventLoop.timerUpdate(idleTimer, config.idleTimeoutMs.toInt)
+
+  private val onIdleTimer: CFuncPtr1[Ptr[Byte], CInt] =
+    (_data: Ptr[Byte]) =>
+      val now = WaylandEventLoop.nowMsec().toLong
+      val (ns, effs, _) = EventHandler.run(config, wm)(IdleHandler.checkIdle(now))
+      wm = ns
+      effs.foreach(executeEffect)
+      // Re-arm for the time still remaining until the deadline. If checkIdle
+      // emitted TerminateDisplay this is moot (the loop is exiting); otherwise
+      // arm exactly until the next possible deadline so we don't busy-wait.
+      val remaining = config.idleTimeoutMs - IdleHandler.idleElapsed(wm.lastActivityMs, now)
+      val armMs = if remaining < 1 then config.idleTimeoutMs else remaining
+      WaylandEventLoop.timerUpdate(idleTimer, armMs.toInt)
+      0
+
+  /**
+   * Change the idle auto-lock timeout at runtime (from an IPC command).
+   *
+   * Updates the shell's [[Server.config]] and re-arms the wl idle timer. The
+   * timer is created lazily if idle auto-lock was disabled at startup, and
+   * disarmed (delay 0) when `ms <= 0`. The last-activity baseline is reset to
+   * "now" so the new timeout is measured from the moment of the change rather
+   * than firing immediately against a stale deadline.
+   */
+  private[compositor] def setIdleTimeout(ms: Long): Unit =
+    config = config.copy(idleTimeoutMs = ms)
+    if ms <= 0 then
+      if idleTimer != null then WaylandEventLoop.timerUpdate(idleTimer, 0)
+    else
+      wm = wm.copy(lastActivityMs = WaylandEventLoop.nowMsec().toLong)
+      if idleTimer == null then
+        val loop = wl_display_get_event_loop(display)
+        idleTimer = WaylandEventLoop.addTimer(loop, onIdleTimer, null)
+      WaylandEventLoop.timerUpdate(idleTimer, ms.toInt)
+
+  /**
+   * Arm the screen-off (DPMS) timer. Same self-rearming, near-deadline-wake
+   * shape as the idle timer, but on fire it powers the outputs off via
+   * `IdleHandler.checkScreenOff` → `SetScreenOff(true)` — it never locks,
+   * suspends, or exits. The next real input re-enables the outputs and pushes
+   * the deadline out. Independent of the auto-lock timer, so it runs in all
+   * modes (default ~7 minutes; disabled when the timeout is 0).
+   */
+  private def initScreenOffTimer(loop: Ptr[WlEventLoop]): Unit =
+    if config.screenOffTimeoutMs <= 0 then return
+    // Seed last-activity if the idle timer didn't already (it may be disabled).
+    if wm.lastActivityMs <= 0 then
+      wm = wm.copy(lastActivityMs = WaylandEventLoop.nowMsec().toLong)
+    dpmsTimer = WaylandEventLoop.addTimer(loop, onDpmsTimer, null)
+    WaylandEventLoop.timerUpdate(dpmsTimer, config.screenOffTimeoutMs.toInt)
+
+  private val onDpmsTimer: CFuncPtr1[Ptr[Byte], CInt] =
+    (_data: Ptr[Byte]) =>
+      val now = WaylandEventLoop.nowMsec().toLong
+      val (ns, effs, _) = EventHandler.run(config, wm)(IdleHandler.checkScreenOff(now))
+      wm = ns
+      effs.foreach(executeEffect)
+      // Re-arm for the time still remaining until the deadline (full timeout if
+      // the deadline has already passed — the screen-off flag makes a repeat
+      // fire a no-op until the next input).
+      val remaining = config.screenOffTimeoutMs - IdleHandler.idleElapsed(wm.lastActivityMs, now)
+      val armMs = if remaining < 1 then config.screenOffTimeoutMs else remaining
+      WaylandEventLoop.timerUpdate(dpmsTimer, armMs.toInt)
+      0
+
+  /**
+   * Change the screen-off (DPMS) timeout at runtime (from an IPC command).
+   * Mirrors [[setIdleTimeout]]: updates `config`, resets the last-activity
+   * baseline, and lazily creates / disarms the wl timer.
+   */
+  private[compositor] def setScreenOffTimeout(ms: Long): Unit =
+    config = config.copy(screenOffTimeoutMs = ms)
+    if ms <= 0 then
+      if dpmsTimer != null then WaylandEventLoop.timerUpdate(dpmsTimer, 0)
+    else
+      wm = wm.copy(lastActivityMs = WaylandEventLoop.nowMsec().toLong)
+      if dpmsTimer == null then
+        val loop = wl_display_get_event_loop(display)
+        dpmsTimer = WaylandEventLoop.addTimer(loop, onDpmsTimer, null)
+      WaylandEventLoop.timerUpdate(dpmsTimer, ms.toInt)
+
+  /**
+   * Power all outputs on or off (DPMS) by committing an enabled/disabled output
+   * state. Re-enabling re-applies the preferred mode; the normal frame loop
+   * then repaints the scene (same path as initial output bring-up in
+   * `onNewOutput`). This only toggles panel power — it does not lock or suspend.
+   */
+  private def setOutputsEnabled(enabled: Boolean): Unit =
+    outputPtrMap.foreach { case (_, output) =>
+      val state = helper_output_state_create()
+      helper_output_state_set_enabled(state, if enabled then 1 else 0)
+      if enabled then
+        val mode = helper_output_get_preferred_mode(output)
+        if mode != null then helper_output_state_set_mode(state, mode)
+      helper_output_commit_state(output, state)
+      helper_output_state_destroy(state)
+    }
 
   private def initBackend(loop: Ptr[WlEventLoop]): Int =
     val headlessEnv = stdlib.getenv(c"SWC_HEADLESS_OUTPUTS")
@@ -207,6 +343,7 @@ object Main:
       listen(helper_backend_get_new_output(backend), onNewOutput),
       listen(helper_backend_get_new_input(backend), onNewInput),
       listen(helper_xdg_shell_get_new_toplevel(xdgShell), onNewToplevel),
+      listen(helper_xdg_shell_get_new_popup(xdgShell), onNewPopup),
       listen(helper_layer_shell_get_new_surface(layerShell), onNewLayerSurface),
       listen(helper_cursor_get_motion(cursor), onCursorMotion),
       listen(helper_cursor_get_motion_absolute(cursor), onCursorMotionAbsolute),
@@ -299,6 +436,15 @@ object Main:
       case ShellEffect.SetGamma(factor) =>
         setGammaAllOutputs(factor)
 
+      case ShellEffect.SetIdleTimeout(ms) =>
+        setIdleTimeout(ms)
+
+      case ShellEffect.SetScreenOff(off) =>
+        setOutputsEnabled(!off)
+
+      case ShellEffect.SetScreenOffTimeout(ms) =>
+        setScreenOffTimeout(ms)
+
       case ShellEffect.ShowLauncher =>
         showLauncherWidget()
 
@@ -316,15 +462,20 @@ object Main:
         val st: UInt = if pressed then 1.toUInt else 0.toUInt
         helper_seat_keyboard_notify_key(seat, time.toUInt, keycode.toUInt, st)
 
-      case ShellEffect.PointerEnter(wid, sx, sy) =>
-        ptrMap.get(wid).foreach { toplevel =>
-          val surface = helper_xdg_toplevel_get_surface(toplevel)
-          if surface != null then
-            helper_seat_pointer_notify_enter(seat, surface, sx, sy)
-        }
+      // Route pointer focus to the EXACT scene surface under the cursor (toplevel,
+      // subsurface, or xdg-popup) instead of always targeting the toplevel root
+      // surface. The pure layer tracks focus at toplevel-WindowId granularity, so it
+      // cannot tell a toplevel apart from its own popup (e.g. a right-click context
+      // menu) — both share one WindowId, so crossing onto a popup emits PointerMotion
+      // rather than PointerEnter. Resolving the surface in the shell (and letting
+      // wlroots dedup the enter) is the standard tinywl approach and the only way
+      // popups receive wl_pointer.enter. Pure protocol forwarding — stays imperative
+      // per AD-006.
+      case ShellEffect.PointerEnter(_, _, _) =>
+        notifyPointerSurface(None)
 
-      case ShellEffect.PointerMotion(time, sx, sy) =>
-        helper_seat_pointer_notify_motion(seat, time.toUInt, sx, sy)
+      case ShellEffect.PointerMotion(time, _, _) =>
+        notifyPointerSurface(Some(time))
 
       case ShellEffect.ClearPointerFocus =>
         helper_seat_pointer_clear_focus(seat)
@@ -544,7 +695,9 @@ object Main:
 
   private val onOutputRequestState: CFuncPtr2[Ptr[Byte], Ptr[Byte], Unit] =
     (listener: Ptr[Byte], data: Ptr[Byte]) =>
-      ()
+      val output = helper_output_event_request_state_get_output(data)
+      val state = helper_output_event_request_state_get_state(data)
+      val _ = helper_output_commit_state(output, state)
 
   // ── Tiling ──────────────────────────────────────────────────────────
 
@@ -581,6 +734,9 @@ object Main:
       val xdgSurface = helper_xdg_toplevel_get_xdg_surface(toplevel)
       val sceneTree = helper_xdg_surface_create_scene_tree(appTree, xdgSurface)
       helper_scene_tree_set_data(sceneTree, toplevel.asInstanceOf[Ptr[Byte]])
+      // Record the scene tree on the xdg_surface so child popups (menus,
+      // right-click context menus) can parent themselves under it in onNewPopup.
+      helper_xdg_surface_set_data(xdgSurface, sceneTree)
 
       val titleOpt = if titlePtr != null then Some(fromCString(titlePtr)) else None
       val (newState, effects, id) = EventHandler.run(config, wm)(
@@ -592,6 +748,7 @@ object Main:
 
       val ctx = new IdPtr(id, toplevel)
       ctx.listeners = List(
+        listenCtx(helper_xdg_toplevel_get_surface_commit(toplevel), onToplevelSurfaceCommit, ctx),
         listenCtx(helper_xdg_toplevel_get_map(toplevel), onToplevelMap, ctx),
         listenCtx(helper_xdg_toplevel_get_unmap(toplevel), onToplevelUnmap, ctx),
         listenCtx(helper_xdg_toplevel_get_destroy(toplevel), onToplevelDestroy, ctx),
@@ -599,9 +756,18 @@ object Main:
         listenCtx(helper_xdg_toplevel_get_request_resize(toplevel), onRequestResize, ctx),
         listenCtx(helper_xdg_toplevel_get_request_fullscreen(toplevel), onRequestFullscreen, ctx)
       )
+      ()
 
-      ListenerExt2.helper_xdg_surface_schedule_configure(toplevel)
-      effects.foreach(executeEffect)
+  // A client created an xdg_popup (menu, dropdown, right-click context menu).
+  // Graft it into the scene graph under its parent surface's tree so it renders
+  // and the cursor hit-test (computePointerFocus / notifyPointerSurface) can
+  // resolve it for pointer input. wlroots auto-destroys the popup scene tree on
+  // surface destroy and manages the popup grab (dismiss-on-outside-click), so
+  // no per-popup listener bookkeeping is needed here.
+  private val onNewPopup: CFuncPtr2[Ptr[Byte], Ptr[Byte], Unit] =
+    (listener: Ptr[Byte], data: Ptr[Byte]) =>
+      val popup = data.asInstanceOf[Ptr[WlrXdgPopup]]
+      helper_scene_xdg_popup_create(popup)
       ()
 
   private def listenCtx(signal: Ptr[Byte], callback: CFuncPtr2[Ptr[Byte], Ptr[Byte], Unit], ctx: AnyRef): Ptr[Byte] =
@@ -622,6 +788,15 @@ object Main:
     var listeners: List[Ptr[Byte]] = Nil
   )
   private var layerSurfaceCtxs: List[LayerCtx] = Nil
+
+  // wlroots 0.19: schedule_configure requires surface->initialized.
+  // The surface is initialized on first commit, so we listen for commit
+  // and send the initial configure when initial_commit is true.
+  private val onToplevelSurfaceCommit: CFuncPtr2[Ptr[Byte], Ptr[Byte], Unit] =
+    (listener: Ptr[Byte], data: Ptr[Byte]) =>
+      val ctx = Listeners.getContext[IdPtr](listener)
+      if helper_xdg_surface_is_initial_commit(ctx.ptr) != 0 then
+        ListenerExt2.helper_xdg_surface_schedule_configure(ctx.ptr)
 
   private val onToplevelMap: CFuncPtr2[Ptr[Byte], Ptr[Byte], Unit] =
     (listener: Ptr[Byte], data: Ptr[Byte]) =>
@@ -981,6 +1156,29 @@ object Main:
         ptrMap.collectFirst { case (wid, ptr) if ptr == toplevelPtr => wid } match
           case Some(wid) => Focus(wid, Vec2(!sx, !sy))
           case None      => NoFocus
+
+  /** Notify the seat of the exact wlr_surface under the cursor.
+    *
+    * Resolves the scene node at the current cursor position and hands the seat the
+    * surface it actually belongs to — which may be an xdg-popup or subsurface, not
+    * just the focused toplevel's root surface. wlroots only re-emits wl_pointer.enter
+    * when the target surface changes, so calling this on every enter/motion is cheap
+    * and is what lets popups (context menus, dropdowns) receive pointer input at all.
+    * When `motionTime` is set, a pointer-motion is forwarded with the same
+    * surface-local coordinates.
+    */
+  private def notifyPointerSurface(motionTime: Option[Long]): Unit =
+    val cx = helper_cursor_get_x(cursor)
+    val cy = helper_cursor_get_y(cursor)
+    val sx = stackalloc[CDouble]()
+    val sy = stackalloc[CDouble]()
+    val node = helper_scene_node_at(scene, cx, cy, sx, sy)
+    val surface = if node != null then helper_scene_node_get_surface(node) else null
+    if surface != null then
+      helper_seat_pointer_notify_enter(seat, surface, !sx, !sy)
+      motionTime.foreach { t =>
+        helper_seat_pointer_notify_motion(seat, t.toUInt, !sx, !sy)
+      }
 
   private def processMotion(time: UInt): Unit =
     // LOCKED pointer constraint (type 0): cursor is frozen — skip focus/motion

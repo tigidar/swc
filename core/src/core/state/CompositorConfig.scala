@@ -11,9 +11,20 @@ import core.output.{OutputId, WorkspaceId}
  * which tracks mutable runtime state.
  */
 case class CompositorConfig(
-  keyBindings:  KeyBindingMap,
-  terminalCmd:  String,
-  windowRules:  List[WindowRule] = Nil
+  keyBindings:   KeyBindingMap,
+  terminalCmd:   String,
+  windowRules:   List[WindowRule] = Nil,
+  // Auto-lock idle timeout in milliseconds. When > 0, the compositor exits
+  // (returning the session to the TTY login prompt) after this long with no
+  // user input. 0 disables idle auto-exit. Set from COMPOSITOR_IDLE_SECONDS.
+  idleTimeoutMs: Long = 0L,
+  // Screen-off (DPMS) idle timeout in milliseconds. When > 0, the compositor
+  // powers all outputs off — and nothing else: no lock, no suspend, no exit —
+  // after this long with no user input; the next key/pointer event powers them
+  // back on. This is independent of and gentler than `idleTimeoutMs`, and runs
+  // "in all modes" whether or not auto-lock is configured. 0 disables. Set from
+  // COMPOSITOR_SCREEN_OFF_SECONDS; defaults to ~7 minutes.
+  screenOffTimeoutMs: Long = 420000L
 )
 
 /**

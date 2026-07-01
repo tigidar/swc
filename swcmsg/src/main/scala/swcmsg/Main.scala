@@ -138,6 +138,12 @@ object Main:
             if args.length < 3 then ""
             else s"""{"cmd":"gamma-set","value":${args(2)}}"""
           case _ => ""
+      case "set-idle-timeout" =>
+        if args.length < 2 then ""
+        else s"""{"cmd":"set-idle-timeout","seconds":${args(1)}}"""
+      case "set-screen-off-timeout" =>
+        if args.length < 2 then ""
+        else s"""{"cmd":"set-screen-off-timeout","seconds":${args(1)}}"""
       case _ => ""
 
   private def printUsage(): Unit =
@@ -159,4 +165,6 @@ object Main:
     stdio.fprintf(stdio.stderr, c"  layout set-master-count <count>\n")
     stdio.fprintf(stdio.stderr, c"  gamma set <0.1-1.0>\n")
     stdio.fprintf(stdio.stderr, c"  gamma reset\n")
+    stdio.fprintf(stdio.stderr, c"  set-idle-timeout <seconds>   (0 disables)\n")
+    stdio.fprintf(stdio.stderr, c"  set-screen-off-timeout <seconds>   (0 disables)\n")
     stdio.fprintf(stdio.stderr, c"Socket: <XDG_RUNTIME_DIR>/swc.sock\n")
